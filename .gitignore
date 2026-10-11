@@ -7,3 +7,5 @@ node_modules/
 dist/
 frontend/.env.local
 backend/.coverage
+
+*.db
