@@ -1,0 +1,31 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: astradeploy
+      POSTGRES_PASSWORD: astradeploy
+      POSTGRES_DB: astradeploy
+    ports: ["5432:5432"]
+    volumes: [astradeploy_pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U astradeploy -d astradeploy"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://astradeploy:astradeploy@db:5432/astradeploy
+      JWT_SECRET: local-development-secret-change-me
+      CORS_ORIGINS: http://localhost:5173
+    ports: ["8000:8000"]
+    depends_on:
+      db: {condition: service_healthy}
+  frontend:
+    build: ./frontend
+    environment:
+      VITE_API_URL: http://localhost:8000/api
+    ports: ["5173:5173"]
+    depends_on: [backend]
+volumes:
+  astradeploy_pgdata:
