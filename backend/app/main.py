@@ -153,3 +153,161 @@ def cost_estimate(workspace_id: int, user: User = Depends(current_user), session
     member_workspace(workspace_id, user, session); items = list(session.scalars(select(Workload).where(Workload.workspace_id == workspace_id)).all())
     recs = [recommendation(w) for w in items]; total = round(sum(r["estimated_monthly_usd"] for r in recs), 2)
     return {"currency":"USD", "estimated_monthly_total":total, "workloads": [{"name":w.name,"estimate_usd":r["estimated_monthly_usd"]} for w,r in zip(items,recs)], "assumptions":"Baseline user-transparent pricing; not actual billed cost."}
+
+# Advanced platform foundation: records are persisted only when supplied by a connected source or user action.
+class ProviderConnection(Base):
+    __tablename__ = "provider_connections"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    provider: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(30), default="disconnected")
+    region: Mapped[str] = mapped_column(String(80), default="unspecified")
+    account_id: Mapped[str] = mapped_column(String(160), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+class ProvisioningPlan(Base):
+    __tablename__ = "provisioning_plans"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    workload_id: Mapped[int] = mapped_column(ForeignKey("workloads.id", ondelete="CASCADE"))
+    provider: Mapped[str] = mapped_column(String(20), default="none")
+    status: Mapped[str] = mapped_column(String(30), default="plan_only")
+    terraform_config: Mapped[str] = mapped_column(Text, default="")
+    cost_note: Mapped[str] = mapped_column(Text, default="Cost requires verified provider pricing")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+class Deployment(Base):
+    __tablename__ = "deployments"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    workload_id: Mapped[int | None] = mapped_column(ForeignKey("workloads.id", ondelete="SET NULL"), nullable=True)
+    provider: Mapped[str] = mapped_column(String(20), default="none")
+    status: Mapped[str] = mapped_column(String(30), default="not_started")
+    external_id: Mapped[str] = mapped_column(String(160), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+class MetricObservation(Base):
+    __tablename__ = "metric_observations"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    workload_id: Mapped[int | None] = mapped_column(ForeignKey("workloads.id", ondelete="SET NULL"), nullable=True)
+    metric: Mapped[str] = mapped_column(String(80)); value: Mapped[float] = mapped_column(Float)
+    source: Mapped[str] = mapped_column(String(120)); observed_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+class CostObservation(Base):
+    __tablename__ = "cost_observations"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    workload_id: Mapped[int | None] = mapped_column(ForeignKey("workloads.id", ondelete="SET NULL"), nullable=True)
+    amount: Mapped[float] = mapped_column(Float); currency: Mapped[str] = mapped_column(String(8), default="USD")
+    source: Mapped[str] = mapped_column(String(120)); observed_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+class Alert(Base):
+    __tablename__ = "alerts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    severity: Mapped[str] = mapped_column(String(20), default="info"); title: Mapped[str] = mapped_column(String(160))
+    status: Mapped[str] = mapped_column(String(20), default="open"); details: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+class Experiment(Base):
+    __tablename__ = "experiments"
+    id: Mapped[int] = mapped_column(primary_key=True); workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(160)); dataset_ref: Mapped[str] = mapped_column(String(300), default="")
+    hyperparameters: Mapped[str] = mapped_column(Text, default="{}"); metrics: Mapped[str] = mapped_column(Text, default="{}"); status: Mapped[str] = mapped_column(String(30), default="created")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+class ModelVersion(Base):
+    __tablename__ = "model_versions"
+    id: Mapped[int] = mapped_column(primary_key=True); workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(160)); version: Mapped[str] = mapped_column(String(60)); artifact_uri: Mapped[str] = mapped_column(String(500), default="")
+    lifecycle: Mapped[str] = mapped_column(String(30), default="candidate"); evaluation: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+class Pipeline(Base):
+    __tablename__ = "pipelines"
+    id: Mapped[int] = mapped_column(primary_key=True); workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(160)); definition: Mapped[str] = mapped_column(Text, default="{}"); enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+class PipelineRun(Base):
+    __tablename__ = "pipeline_runs"
+    id: Mapped[int] = mapped_column(primary_key=True); pipeline_id: Mapped[int] = mapped_column(ForeignKey("pipelines.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="queued"); logs: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+class NameIn(BaseModel): name: str = Field(min_length=2, max_length=160)
+class ProviderIn(BaseModel): provider: str; region: str = "unspecified"; account_id: str = ""
+class MetricIn(BaseModel): metric: str; value: float; source: str
+class CostIn(BaseModel): amount: float = Field(ge=0); currency: str = "USD"; source: str
+class AlertIn(BaseModel): severity: str = "info"; title: str; details: str = ""
+class ExperimentIn(BaseModel): name: str; dataset_ref: str = ""; hyperparameters: dict = {}
+class ModelIn(BaseModel): name: str; version: str; artifact_uri: str = ""; lifecycle: str = "candidate"; evaluation: dict = {}
+class PipelineIn(BaseModel): name: str; definition: dict = {}; enabled: bool = False
+
+def plan_hcl(w: Workload, provider: str):
+    r = recommendation(w)
+    return f'''# AstraDeploy generated plan-only configuration\n# Provider: {provider}\n# This configuration is not applied automatically.\nresource "container_service" "{w.name.replace("-", "_")}" {{\n  cpu = {r["recommended_cpu"]}\n  memory_gb = {r["recommended_memory_gb"]}\n  replicas = {r["replicas"]}\n  region = "{w.region}"\n}}'''
+def workspace_items(workspace_id: int, user: User, session: Session):
+    member_workspace(workspace_id, user, session)
+
+def audit(session: Session, workspace_id: int, user_id: int, action: str):
+    session.add(AuditEvent(workspace_id=workspace_id, user_id=user_id, action=action))
+
+@app.get("/api/workspaces/{workspace_id}/providers")
+def provider_status(workspace_id: int, user: User = Depends(current_user), session: Session = Depends(db)):
+    workspace_items(workspace_id, user, session)
+    rows = list(session.scalars(select(ProviderConnection).where(ProviderConnection.workspace_id == workspace_id)).all())
+    by_name = {r.provider: r for r in rows}
+    return [{"provider": p, "status": by_name[p].status if p in by_name else "disconnected", "region": by_name[p].region if p in by_name else "unspecified", "account_id": by_name[p].account_id if p in by_name else ""} for p in ["aws", "azure", "gcp"]]
+@app.post("/api/workspaces/{workspace_id}/providers", status_code=201)
+def connect_provider(workspace_id: int, data: ProviderIn, user: User = Depends(current_user), session: Session = Depends(db)):
+    workspace_items(workspace_id, user, session)
+    if data.provider not in {"aws", "azure", "gcp"}: raise HTTPException(400, "Provider must be aws, azure, or gcp")
+    row = session.scalar(select(ProviderConnection).where(ProviderConnection.workspace_id == workspace_id, ProviderConnection.provider == data.provider))
+    if not row: row = ProviderConnection(workspace_id=workspace_id, provider=data.provider); session.add(row)
+    row.status = "configured_pending_validation"; row.region = data.region; row.account_id = data.account_id
+    audit(session, workspace_id, user.id, f"provider.{data.provider}.configured"); session.commit()
+    return {"provider": data.provider, "status": row.status, "message": "Credentials are metadata-only until a secure secret integration is configured."}
+@app.get("/api/workspaces/{workspace_id}/provisioning-plans")
+def list_plans(workspace_id: int, user: User = Depends(current_user), session: Session = Depends(db)):
+    workspace_items(workspace_id, user, session); return [{"id":x.id,"workload_id":x.workload_id,"provider":x.provider,"status":x.status,"cost_note":x.cost_note,"terraform_config":x.terraform_config} for x in session.scalars(select(ProvisioningPlan).where(ProvisioningPlan.workspace_id == workspace_id).order_by(ProvisioningPlan.id.desc())).all()]
+@app.post("/api/workspaces/{workspace_id}/workloads/{workload_id}/provisioning-plans", status_code=201)
+def create_plan(workspace_id: int, workload_id: int, provider: str = "none", user: User = Depends(current_user), session: Session = Depends(db)):
+    workspace_items(workspace_id, user, session); w = session.scalar(select(Workload).where(Workload.id == workload_id, Workload.workspace_id == workspace_id))
+    if not w: raise HTTPException(404, "Workload not found")
+    p = ProvisioningPlan(workspace_id=workspace_id, workload_id=workload_id, provider=provider, terraform_config=plan_hcl(w, provider)); session.add(p); audit(session, workspace_id, user.id, "provisioning.plan.created"); session.commit(); session.refresh(p)
+    return {"id":p.id,"status":"plan_only","provider":provider,"terraform_config":p.terraform_config,"cost_note":p.cost_note,"apply_allowed":False}
+@app.get("/api/workspaces/{workspace_id}/deployments")
+def list_deployments(workspace_id: int, user: User = Depends(current_user), session: Session = Depends(db)):
+    workspace_items(workspace_id, user, session); return [{"id":x.id,"workload_id":x.workload_id,"provider":x.provider,"status":x.status,"external_id":x.external_id} for x in session.scalars(select(Deployment).where(Deployment.workspace_id == workspace_id).order_by(Deployment.id.desc())).all()]
+@app.get("/api/workspaces/{workspace_id}/monitoring")
+def monitoring(workspace_id: int, user: User = Depends(current_user), session: Session = Depends(db)):
+    workspace_items(workspace_id, user, session); rows = session.scalars(select(MetricObservation).where(MetricObservation.workspace_id == workspace_id).order_by(MetricObservation.observed_at.desc()).limit(100)).all()
+    return {"connected": bool(rows), "message": "No telemetry source connected" if not rows else "User/source observations", "observations":[{"metric":x.metric,"value":x.value,"source":x.source,"observed_at":x.observed_at} for x in rows]}
+@app.post("/api/workspaces/{workspace_id}/metrics", status_code=201)
+def add_metric(workspace_id: int, data: MetricIn, user: User = Depends(current_user), session: Session = Depends(db)):
+    workspace_items(workspace_id, user, session); x=MetricObservation(workspace_id=workspace_id, **data.model_dump()); session.add(x); audit(session, workspace_id, user.id, "monitoring.observation.created"); session.commit(); return {"id":x.id,"status":"recorded"}
+@app.get("/api/workspaces/{workspace_id}/cost-observations")
+def cost_observations(workspace_id: int, user: User = Depends(current_user), session: Session = Depends(db)):
+    workspace_items(workspace_id, user, session); return [{"amount":x.amount,"currency":x.currency,"source":x.source,"observed_at":x.observed_at} for x in session.scalars(select(CostObservation).where(CostObservation.workspace_id == workspace_id).order_by(CostObservation.observed_at.desc())).all()]
+@app.post("/api/workspaces/{workspace_id}/cost-observations", status_code=201)
+def add_cost(workspace_id: int, data: CostIn, user: User = Depends(current_user), session: Session = Depends(db)):
+    workspace_items(workspace_id, user, session); x=CostObservation(workspace_id=workspace_id, **data.model_dump()); session.add(x); audit(session, workspace_id, user.id, "cost.observation.created"); session.commit(); return {"id":x.id,"status":"recorded"}
+@app.get("/api/workspaces/{workspace_id}/alerts")
+def alerts(workspace_id: int, user: User = Depends(current_user), session: Session = Depends(db)):
+    workspace_items(workspace_id, user, session); return [{"id":x.id,"severity":x.severity,"title":x.title,"status":x.status,"details":x.details,"created_at":x.created_at} for x in session.scalars(select(Alert).where(Alert.workspace_id == workspace_id).order_by(Alert.id.desc())).all()]
+@app.post("/api/workspaces/{workspace_id}/alerts", status_code=201)
+def add_alert(workspace_id: int, data: AlertIn, user: User = Depends(current_user), session: Session = Depends(db)):
+    workspace_items(workspace_id, user, session); x=Alert(workspace_id=workspace_id, **data.model_dump()); session.add(x); audit(session, workspace_id, user.id, "alert.created"); session.commit(); session.refresh(x); return {"id":x.id,"severity":x.severity,"title":x.title,"status":x.status}
+@app.get("/api/workspaces/{workspace_id}/audit-logs")
+def audit_logs(workspace_id: int, user: User = Depends(current_user), session: Session = Depends(db)):
+    workspace_items(workspace_id, user, session); return [{"id":x.id,"action":x.action,"user_id":x.user_id,"created_at":x.created_at} for x in session.scalars(select(AuditEvent).where(AuditEvent.workspace_id == workspace_id).order_by(AuditEvent.id.desc()).limit(200)).all()]
+@app.post("/api/workspaces/{workspace_id}/experiments", status_code=201)
+def create_experiment(workspace_id: int, data: ExperimentIn, user: User = Depends(current_user), session: Session = Depends(db)):
+    workspace_items(workspace_id, user, session); x=Experiment(workspace_id=workspace_id,name=data.name,dataset_ref=data.dataset_ref,hyperparameters=str(data.hyperparameters)); session.add(x); audit(session, workspace_id, user.id, "ml.experiment.created"); session.commit(); session.refresh(x); return {"id":x.id,"name":x.name,"status":x.status,"dataset_ref":x.dataset_ref,"hyperparameters":data.hyperparameters}
+@app.get("/api/workspaces/{workspace_id}/experiments")
+def experiments(workspace_id: int, user: User = Depends(current_user), session: Session = Depends(db)):
+    workspace_items(workspace_id, user, session); return [{"id":x.id,"name":x.name,"status":x.status,"dataset_ref":x.dataset_ref,"metrics":x.metrics} for x in session.scalars(select(Experiment).where(Experiment.workspace_id == workspace_id)).all()]
+@app.post("/api/workspaces/{workspace_id}/models", status_code=201)
+def create_model(workspace_id: int, data: ModelIn, user: User = Depends(current_user), session: Session = Depends(db)):
+    workspace_items(workspace_id, user, session); x=ModelVersion(workspace_id=workspace_id,name=data.name,version=data.version,artifact_uri=data.artifact_uri,lifecycle=data.lifecycle,evaluation=str(data.evaluation)); session.add(x); audit(session, workspace_id, user.id, "ml.model_version.created"); session.commit(); session.refresh(x); return {"id":x.id,"name":x.name,"version":x.version,"lifecycle":x.lifecycle,"artifact_uri":x.artifact_uri}
+@app.get("/api/workspaces/{workspace_id}/models")
+def models(workspace_id: int, user: User = Depends(current_user), session: Session = Depends(db)):
+    workspace_items(workspace_id, user, session); return [{"id":x.id,"name":x.name,"version":x.version,"lifecycle":x.lifecycle,"artifact_uri":x.artifact_uri} for x in session.scalars(select(ModelVersion).where(ModelVersion.workspace_id == workspace_id)).all()]
+@app.post("/api/workspaces/{workspace_id}/pipelines", status_code=201)
+def create_pipeline(workspace_id: int, data: PipelineIn, user: User = Depends(current_user), session: Session = Depends(db)):
+    workspace_items(workspace_id, user, session); x=Pipeline(workspace_id=workspace_id,name=data.name,definition=str(data.definition),enabled=data.enabled); session.add(x); audit(session, workspace_id, user.id, "ml.pipeline.created"); session.commit(); session.refresh(x); return {"id":x.id,"name":x.name,"enabled":x.enabled,"definition":data.definition}
+@app.get("/api/workspaces/{workspace_id}/pipelines")
+def pipelines(workspace_id: int, user: User = Depends(current_user), session: Session = Depends(db)):
+    workspace_items(workspace_id, user, session); return [{"id":x.id,"name":x.name,"enabled":x.enabled,"definition":x.definition} for x in session.scalars(select(Pipeline).where(Pipeline.workspace_id == workspace_id)).all()]
